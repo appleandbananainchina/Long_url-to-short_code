@@ -1,0 +1,70 @@
+# Binaries
+/bin/
+/dist/
+/*.exe
+/*.exe~
+/*.dll
+/*.so
+/*.dylib
+/short-url-service
+/short-url-service.exe
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+
+# Dependency directories
+vendor/
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE - JetBrains
+.idea/
+/shelf/
+/workspace.xml
+/queries/
+/dataSources/
+/dataSources.local.xml
+/httpRequests/
+
+# IDE - VSCode
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Config files with secrets
+.env
+.env.local
+.env.*.local
+config.json
+config.local.json
+*.key
+*.pem
+*.crt
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+/tmp
+*.tmp
+*.temp
+
+# Build output
+*.out
