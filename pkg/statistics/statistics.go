@@ -3,9 +3,12 @@ package statistics
 import (
 	"context"
 	"errors"
-	"log"
+	"fmt"
+	"log/slog"
 	"short-url-service/pkg/cache"
+	"short-url-service/pkg/metrics"
 	"sync"
+	"time"
 )
 
 type Task struct {
@@ -53,8 +56,13 @@ func (worker *StatisticsWorker) worker(id int) {
 				return
 			}
 			// 执行统计：Redis INCR
-			if err := worker.redisCli.Incr(ctx, "stats:"+task.application+task.key).Err(); err != nil {
-				log.Printf("worker[%d] record %s failed for %s: %v", id, task.application, task.key, err)
+			if err := worker.redisCli.Incr(ctx, fmt.Sprintf("stats:%s:%s", task.application, task.key)).Err(); err != nil {
+				slog.ErrorContext(context.Background(), "statistics record failed",
+					"worker_id", id,
+					"application", task.application,
+					"key", task.key,
+					"error", err,
+				)
 			}
 		case <-worker.stopCh:
 			return
@@ -69,21 +77,29 @@ func RecordAsync(application, key string) error {
 	task := Task{application, key}
 	select {
 	case worker.taskQueue <- task:
+		metrics.StatisticsQueueLength.Set(float64(len(worker.taskQueue)))
 		return nil
 	default:
-		// 队列满，丢弃任务并记录日志
+		metrics.StatisticsQueueDropped.Inc()
 		return errors.New("task queue is full")
 	}
 }
 
-func StopWorker() {
-	if worker == nil {
-		return
-	}
-	close(worker.stopCh)
+func StopWorker(timeout time.Duration) {
 	close(worker.taskQueue)
-	worker.wg.Wait()
-	log.Println("stop worker success")
+	done := make(chan struct{})
+	go func() {
+		worker.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		slog.Info("stop worker success")
+	case <-time.After(timeout):
+		slog.Warn("statistics worker stop timeout")
+		close(worker.stopCh)
+		worker.wg.Wait()
+	}
 }
 
 func GetQueueLength() int {

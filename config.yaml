@@ -1,0 +1,22 @@
+server:
+  port: "8080"
+
+redis:
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+
+mysql:
+  dsn: "root:123456@tcp(127.0.0.1:3306)/short_url?charset=utf8mb4&parseTime=True&loc=Local"
+
+idgen:
+  machine_id: 1
+
+rate_limit:
+  enabled: true
+  type: "memory"          # memory / redis / noop
+  memory:
+    rate: 20
+    burst: 30
+  redis:
+    rate: 20

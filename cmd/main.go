@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -19,23 +19,40 @@ import (
 	"short-url-service/pkg/config"
 
 	"github.com/joho/godotenv"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/time/rate"
 )
 
+func init() {
+	// JSON 格式输出，便于日志系统采集
+	jsonHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})
+	traceHandler := middleware.NewTraceHandler(jsonHandler)
+	logger := slog.New(traceHandler).With("service", "short-url")
+	slog.SetDefault(logger)
+}
+
 func main() {
 	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found, relying on system env")
+		slog.Info("No .env file found, relying on system env")
 	}
 	// 加载配置
-	cfg, err := config.Load("config.json") // 可改为环境变量或命令行参数
+	configPath := os.Getenv("CONFIG_PATH")
+	if configPath == "" {
+		configPath = "config.yaml" // 或 config.json
+	}
+	cfg, err := config.Load(configPath)
 	if err != nil {
-		log.Fatalf("load config error: %v", err)
+		slog.Error("load config error", "error", err)
+		os.Exit(1)
 	}
 
 	// 初始化MySQL
 	mysqlRepo, err := repository.NewMySQLRepo(cfg.MySQL.DSN)
 	if err != nil {
-		log.Fatalf("connect mysql error: %v", err)
+		slog.Error("connect mysql error", "error", err)
+		os.Exit(1)
 	}
 	defer mysqlRepo.Close()
 
@@ -44,7 +61,8 @@ func main() {
 
 	// 初始化布隆过滤器
 	if err := bloom.InitBloom(redisCli.Raw(), 10_000_000, 0.0001); err != nil {
-		log.Fatalf("init bloom error: %v", err)
+		slog.Error("init bloom error", "error", err)
+		os.Exit(1)
 	}
 
 	// 初始化业务服务
@@ -54,20 +72,39 @@ func main() {
 
 	//预热布隆过滤器
 	go func() {
-		if err := bloom.Warmup(redisCli.Raw(), mysqlRepo, 200); err != nil {
-			log.Printf("bloom warmup error: %v", err)
+		if err := bloom.Warmup(redisCli.Raw(), mysqlRepo, 200, context.Background()); err != nil {
+			slog.Error("bloom warmup error", "error", err)
 		}
 	}()
 
-	limiter := middleware.NewIPRateLimiter(rate.Limit(1), 3, 5*time.Minute)
+	var l middleware.Limiter
+
+	if !cfg.RateLimit.Enabled {
+		l = middleware.NoopLimiter{}
+	} else {
+		switch cfg.RateLimit.Type {
+		case "redis":
+			// 需要传入 redis 客户端
+			l = middleware.NewRedisLimiter(redisCli.Raw(), cfg.RateLimit.Redis.Rate)
+		case "memory":
+			// 使用原有的内存限流器
+			l = middleware.NewIPRateLimiter(
+				rate.Limit(cfg.RateLimit.Memory.Rate),
+				cfg.RateLimit.Memory.Burst,
+				5*time.Minute, // 清理间隔可配置
+			)
+		default:
+			l = middleware.NoopLimiter{}
+		}
+	}
 
 	// 设置路由
 	mux := http.NewServeMux()
 	mux.HandleFunc("/shorten", handler.ShortenHandler(shortenerService))
 	mux.HandleFunc("/", handler.RedirectHandler(shortenerService))
-
+	mux.Handle("/metrics", promhttp.Handler())
 	// 应用中间件
-	handlerWithMiddleware := middleware.Recover(limiter.RateLimitMiddleWare(mux))
+	handlerWithMiddleware := middleware.TraceMiddleware(middleware.Recover(l.Middleware(mux)))
 
 	// 启动HTTP服务器
 	srv := &http.Server{
@@ -77,23 +114,25 @@ func main() {
 
 	// 优雅关闭
 	go func() {
-		log.Printf("Server starting on :%s", cfg.Server.Port)
+		slog.Info("Server starting", "port", cfg.Server.Port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %s\n", err)
+			slog.Error("listen error", "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	log.Println("Shutting down server...")
+	slog.Info("Shutting down server...")
 
-	statistics.StopWorker()
+	statistics.StopWorker(time.Duration(10) * time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatal("Server forced to shutdown:", err)
+		slog.Error("Server forced to shutdown", "error", err)
+		os.Exit(1)
 	}
-	log.Println("Server exited")
+	slog.Info("Server exited")
 }

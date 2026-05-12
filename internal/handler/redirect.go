@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"errors"
+	"log/slog"
 	"net/http"
 	"short-url-service/pkg/statistics"
 	"strings"
@@ -18,17 +20,22 @@ func RedirectHandler(shortener *service.ShortenerService) http.HandlerFunc {
 		}
 
 		longURL, err := shortener.GetLongURL(r.Context(), shortCode)
-		if err != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
+
+		if errors.Is(err, service.ErrNotFound) {
+			http.NotFound(w, r)
 			return
 		}
-		if longURL == "" {
-			http.NotFound(w, r)
+		if err != nil {
+			slog.ErrorContext(r.Context(), "get long url failed", "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 		err = statistics.RecordAsync("redirect", shortCode)
 		if err != nil {
-			shortener.SetIncr(r.Context(), "redirect", shortCode)
+			/**if setErr := shortener.SetIncr(r.Context(), "redirect", shortCode); setErr != nil {
+				slog.WarnContext(r.Context(), "set incr failed", "error", setErr)
+			}**/
+			slog.ErrorContext(r.Context(), "record async failed", "error", err)
 		}
 		// 重定向到原始URL
 		http.Redirect(w, r, longURL, http.StatusFound)

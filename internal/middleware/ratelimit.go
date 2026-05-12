@@ -11,6 +11,8 @@ import (
 	"golang.org/x/time/rate"
 )
 
+const cleanupMultiplier = 2
+
 type MyLimiter struct {
 	*rate.Limiter           // 嵌入，继承所有方法
 	lastAccess    time.Time // 每个IP独立的最后访问时间
@@ -64,7 +66,7 @@ func (i *IPRateLimiter) cleanupExpired() {
 	for range ticker.C {
 		i.mu.Lock()
 		for ip, limiter := range i.ips {
-			if time.Since(limiter.lastAccessTime()) > i.cleanupT*2 {
+			if time.Since(limiter.lastAccessTime()) > i.cleanupT*cleanupMultiplier {
 				delete(i.ips, ip)
 			}
 		}
@@ -72,7 +74,7 @@ func (i *IPRateLimiter) cleanupExpired() {
 	}
 }
 
-func (i *IPRateLimiter) RateLimitMiddleWare(next http.Handler) http.Handler {
+func (i *IPRateLimiter) RateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := getRealIp(r)
 		if !i.Allow(ip) {
@@ -121,4 +123,8 @@ func (limiter *MyLimiter) lastAccessTime() time.Time {
 	limiter.mu.RLock()
 	defer limiter.mu.RUnlock()
 	return limiter.lastAccess
+}
+
+func (i *IPRateLimiter) Middleware(next http.Handler) http.Handler {
+	return i.RateLimitMiddleware(next)
 }

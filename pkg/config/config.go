@@ -2,9 +2,12 @@ package config
 
 import (
 	"encoding/json"
-	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
@@ -19,15 +22,29 @@ type Config struct {
 	} `json:"redis" yaml:"redis"`
 
 	MySQL struct {
-		DSN string `json:"dsn" yaml:"dsn"` // "user:pass@tcp(127.0.0.1:3306)/dbname?charset=utf8mb4&parseTime=True&loc=Local"
+		DSN string `json:"dsn" yaml:"dsn"`
 	} `json:"mysql" yaml:"mysql"`
 
 	IDGen struct {
-		MachineID int64 `json:"machine_id" yaml:"machine_id"` // 雪花算法机器ID（0-1023）
+		MachineID int64 `json:"machine_id" yaml:"machine_id"`
 	} `json:"idgen" yaml:"idgen"`
+
+	RateLimit RateLimitConfig `json:"rate_limit" yaml:"rate_limit"`
 }
 
-// Load 从文件或环境变量加载配置，优先级：环境变量 > 文件 > 默认值
+type RateLimitConfig struct {
+	Enabled bool   `yaml:"enabled" json:"enabled"` // 总开关
+	Type    string `yaml:"type" json:"type"`       // "memory", "redis", "noop"
+	Memory  struct {
+		Rate  float64 `yaml:"rate" json:"rate"`
+		Burst int     `yaml:"burst" json:"burst"`
+	} `yaml:"memory" json:"memory"`
+	Redis struct {
+		Rate int `yaml:"rate" json:"rate"` // 每秒请求数
+	} `yaml:"redis" json:"redis"`
+}
+
+// Load 从文件加载配置，支持 .json 或 .yaml/.yml，并允许环境变量覆盖
 func Load(path string) (*Config, error) {
 	cfg := &Config{}
 	// 默认值
@@ -36,17 +53,32 @@ func Load(path string) (*Config, error) {
 	cfg.Redis.Password = ""
 	cfg.Redis.DB = 0
 	cfg.MySQL.DSN = ""
+	cfg.RateLimit.Enabled = true
+	cfg.RateLimit.Type = "memory"
+	cfg.RateLimit.Memory.Rate = 20
+	cfg.RateLimit.Memory.Burst = 30
+	cfg.RateLimit.Redis.Rate = 20
 
-	// 尝试读取配置文件
+	// 如果指定了配置文件，尝试读取
 	if path != "" {
-		data, err := ioutil.ReadFile(filepath.Clean(path))
+		data, err := os.ReadFile(filepath.Clean(path))
 		if err == nil {
-			// 简单支持JSON，实际可使用yaml库
-			_ = json.Unmarshal(data, cfg)
+			ext := strings.ToLower(filepath.Ext(path))
+			switch ext {
+			case ".json":
+				err = json.Unmarshal(data, cfg)
+			case ".yaml", ".yml":
+				err = yaml.Unmarshal(data, cfg)
+			}
+			if err != nil {
+				return nil, err
+			}
+		} else if !os.IsNotExist(err) {
+			return nil, err
 		}
 	}
 
-	// 环境变量覆盖
+	// 环境变量覆盖（优先级最高）
 	if port := os.Getenv("SERVER_PORT"); port != "" {
 		cfg.Server.Port = port
 	}
@@ -59,7 +91,37 @@ func Load(path string) (*Config, error) {
 	if mysqlDSN := os.Getenv("MYSQL_DSN"); mysqlDSN != "" {
 		cfg.MySQL.DSN = mysqlDSN
 	}
-	// ... 其他环境变量
-
+	if machineID := os.Getenv("MACHINE_ID"); machineID != "" {
+		if id, err := strconv.ParseInt(machineID, 10, 64); err == nil {
+			cfg.IDGen.MachineID = id
+		}
+	}
+	// ========== 限流环境变量覆盖 ==========
+	if v := os.Getenv("RATE_LIMIT_ENABLED"); v != "" {
+		switch strings.ToLower(v) {
+		case "true", "1", "yes", "on":
+			cfg.RateLimit.Enabled = true
+		case "false", "0", "no", "off":
+			cfg.RateLimit.Enabled = false
+		}
+	}
+	if v := os.Getenv("RATE_LIMIT_TYPE"); v != "" {
+		cfg.RateLimit.Type = v
+	}
+	if v := os.Getenv("RATE_LIMIT_MEMORY_RATE"); v != "" {
+		if rate, err := strconv.ParseFloat(v, 64); err == nil {
+			cfg.RateLimit.Memory.Rate = rate
+		}
+	}
+	if v := os.Getenv("RATE_LIMIT_MEMORY_BURST"); v != "" {
+		if burst, err := strconv.Atoi(v); err == nil {
+			cfg.RateLimit.Memory.Burst = burst
+		}
+	}
+	if v := os.Getenv("RATE_LIMIT_REDIS_RATE"); v != "" {
+		if rate, err := strconv.Atoi(v); err == nil {
+			cfg.RateLimit.Redis.Rate = rate
+		}
+	}
 	return cfg, nil
 }

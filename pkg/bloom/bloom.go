@@ -3,12 +3,19 @@ package bloom
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/go-redis/redis/v8"
 )
 
-const bloomFilterKey = "short_url_bloom"
+const (
+	bloomFilterKey  = "short_url_bloom"
+	bloomReserveCmd = "BF.RESERVE"
+	bloomAddCmd     = "BF.ADD"
+	bloomInsertCmd  = "BF.INSERT"
+	bloomExistsCmd  = "BF.EXISTS"
+	bloomExpansion  = 2
+)
 
 func InitBloom(rdb *redis.Client, capacity uint64, errorRate float64) error {
 	ctx := context.Background()
@@ -17,20 +24,20 @@ func InitBloom(rdb *redis.Client, capacity uint64, errorRate float64) error {
 		return fmt.Errorf("check bloom exists failed %w", err)
 	}
 	if exists == 0 {
-		_, err := rdb.Do(ctx, "BF.RESERVE", bloomFilterKey, errorRate, capacity, "EXPANSION", 2).Result()
+		_, err := rdb.Do(ctx, bloomReserveCmd, bloomFilterKey, errorRate, capacity, "EXPANSION", bloomExpansion).Result()
 		if err != nil {
 			return fmt.Errorf("create bloom filter failed %w", err)
 		}
-		log.Println("Create bloom filter success")
+		slog.InfoContext(context.Background(), "Create bloom filter success")
 	} else {
-		log.Printf("bloom filter exists")
+		slog.InfoContext(context.Background(), "bloom filter exists")
 	}
 	return nil
 }
 
 func Add(rdb *redis.Client, shortCode string) error {
 	ctx := context.Background()
-	_, err := rdb.Do(ctx, "BF.ADD", bloomFilterKey, shortCode).Result()
+	_, err := rdb.Do(ctx, bloomAddCmd, bloomFilterKey, shortCode).Result()
 	return err
 }
 
@@ -40,7 +47,7 @@ func AddBatch(rdb *redis.Client, shortCodes []string) error {
 	}
 	ctx := context.Background()
 	args := make([]interface{}, 0, len(shortCodes)+2)
-	args = append(args, "BF.INSERT", bloomFilterKey, "ITEMS")
+	args = append(args, bloomInsertCmd, bloomFilterKey, "ITEMS")
 	for _, shortCode := range shortCodes {
 		args = append(args, shortCode)
 	}
@@ -50,7 +57,7 @@ func AddBatch(rdb *redis.Client, shortCodes []string) error {
 
 func Contains(rdb *redis.Client, shortCode string) (bool, error) {
 	ctx := context.Background()
-	result, err := rdb.Do(ctx, "BF.EXISTS", bloomFilterKey, shortCode).Result()
+	result, err := rdb.Do(ctx, bloomExistsCmd, bloomFilterKey, shortCode).Result()
 	if err != nil {
 		return false, err
 	}
@@ -62,38 +69,33 @@ func Contains(rdb *redis.Client, shortCode string) (bool, error) {
 }
 
 func Warmup(rdb *redis.Client, repo interface {
-	GetAllShortKeys(batchSize, offset int) ([]string, error)
-	GetTotalCount() (int, error)
-}, batchSize int) error {
-	log.Println("Startting bloom filter warmup...")
-	total, err := repo.GetTotalCount()
-	if err != nil {
-		return fmt.Errorf("GetTotalCount failed with error %w", err)
-	}
-	if total == 0 {
-		log.Println("No bloom filter warmup...")
-		return nil
-	}
-	offset := 0
+	GetAllShortKeysCursor(batchSize int, lastID int64) ([]string, int64, error)
+}, batchSize int, ctx context.Context) error {
+	slog.InfoContext(ctx, "Starting bloom filter warmup...")
+
+	var lastID int64 = 0
 	addedCount := 0
 	for {
-		keys, err := repo.GetAllShortKeys(batchSize, offset)
+		keys, newLastID, err := repo.GetAllShortKeysCursor(batchSize, lastID)
 		if err != nil {
-			return fmt.Errorf("fetch short keys failed at offset %d: %w", offset, err)
+			return fmt.Errorf("fetch short keys failed: %w", err)
 		}
 		if len(keys) == 0 {
 			break
 		}
 		if err := AddBatch(rdb, keys); err != nil {
-			return fmt.Errorf("add batch failed at offset %d: %w", offset, err)
+			return fmt.Errorf("add batch failed: %w", err)
 		}
 		addedCount += len(keys)
-		log.Printf("Warmup progress: %d/%d keys added", addedCount, total)
+		slog.InfoContext(ctx, "Bloom filter warmup progress",
+			"added", addedCount,
+			"lastID", newLastID,
+		)
 		if len(keys) < batchSize {
-			break
+			break // 最后一批
 		}
-		offset += batchSize
+		lastID = newLastID
 	}
-	log.Printf("Bloom filter warmup completed: %d keys added", addedCount)
+	slog.InfoContext(ctx, "Bloom filter warmup completed", "added", addedCount)
 	return nil
 }

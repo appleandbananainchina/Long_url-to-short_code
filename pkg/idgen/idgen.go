@@ -37,13 +37,21 @@ func (s *Snowflake) NextID() int64 {
 	defer s.mu.Unlock()
 
 	now := time.Now().UnixMilli()
+	if now < s.lastStamp {
+		for now < s.lastStamp {
+			// 最多等待 2 秒（避免无限循环）
+			if s.lastStamp-now > 2000 {
+				panic("clock moved backwards more than 2 seconds, unrecoverable")
+			}
+			time.Sleep(1 * time.Millisecond)
+			now = time.Now().UnixMilli()
+		}
+	}
 	if now == s.lastStamp {
 		s.sequence = (s.sequence + 1) & sequenceMask
 		if s.sequence == 0 {
-			// 等待下一毫秒
-			for now <= s.lastStamp {
-				now = time.Now().UnixMilli()
-			}
+			time.Sleep(1 * time.Millisecond)
+			now = time.Now().UnixMilli()
 		}
 	} else {
 		s.sequence = 0
