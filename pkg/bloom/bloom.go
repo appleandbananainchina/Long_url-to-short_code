@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	bloomFilterKey  = "short_url_bloom"
+	BloomFilterKey  = "short_url_bloom"
 	bloomReserveCmd = "BF.RESERVE"
 	bloomAddCmd     = "BF.ADD"
 	bloomInsertCmd  = "BF.INSERT"
@@ -19,12 +19,12 @@ const (
 
 func InitBloom(rdb *redis.Client, capacity uint64, errorRate float64) error {
 	ctx := context.Background()
-	exists, err := rdb.Exists(ctx, bloomFilterKey).Result()
+	exists, err := rdb.Exists(ctx, BloomFilterKey).Result()
 	if err != nil {
 		return fmt.Errorf("check bloom exists failed %w", err)
 	}
 	if exists == 0 {
-		_, err := rdb.Do(ctx, bloomReserveCmd, bloomFilterKey, errorRate, capacity, "EXPANSION", bloomExpansion).Result()
+		_, err := rdb.Do(ctx, bloomReserveCmd, BloomFilterKey, errorRate, capacity, "EXPANSION", bloomExpansion).Result()
 		if err != nil {
 			return fmt.Errorf("create bloom filter failed %w", err)
 		}
@@ -37,7 +37,7 @@ func InitBloom(rdb *redis.Client, capacity uint64, errorRate float64) error {
 
 func Add(rdb *redis.Client, shortCode string) error {
 	ctx := context.Background()
-	_, err := rdb.Do(ctx, bloomAddCmd, bloomFilterKey, shortCode).Result()
+	_, err := rdb.Do(ctx, bloomAddCmd, BloomFilterKey, shortCode).Result()
 	return err
 }
 
@@ -47,7 +47,7 @@ func AddBatch(rdb *redis.Client, shortCodes []string) error {
 	}
 	ctx := context.Background()
 	args := make([]interface{}, 0, len(shortCodes)+2)
-	args = append(args, bloomInsertCmd, bloomFilterKey, "ITEMS")
+	args = append(args, bloomInsertCmd, BloomFilterKey, "ITEMS")
 	for _, shortCode := range shortCodes {
 		args = append(args, shortCode)
 	}
@@ -57,7 +57,7 @@ func AddBatch(rdb *redis.Client, shortCodes []string) error {
 
 func Contains(rdb *redis.Client, shortCode string) (bool, error) {
 	ctx := context.Background()
-	result, err := rdb.Do(ctx, bloomExistsCmd, bloomFilterKey, shortCode).Result()
+	result, err := rdb.Do(ctx, bloomExistsCmd, BloomFilterKey, shortCode).Result()
 	if err != nil {
 		return false, err
 	}

@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"short-url-service/pkg/bloom"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -35,4 +36,14 @@ func (r *RedisClient) Incr(ctx context.Context, key string) *redis.IntCmd {
 
 func (r *RedisClient) Raw() *redis.Client {
 	return r.client
+}
+
+func (r *RedisClient) SetWithBloom(ctx context.Context, shortCode, longURL string, expiration time.Duration) error {
+	pipe := r.client.Pipeline()
+	// Bloom Add
+	pipe.Do(ctx, "BF.ADD", bloom.BloomFilterKey, shortCode) // 需要导出 bloomFilterKey
+	// Cache Set
+	pipe.Set(ctx, shortCode, longURL, expiration)
+	_, err := pipe.Exec(ctx)
+	return err
 }

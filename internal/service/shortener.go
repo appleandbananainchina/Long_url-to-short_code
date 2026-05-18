@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"short-url-service/internal/repository"
+	"short-url-service/internal/writer"
 	"short-url-service/pkg/bloom"
 	"short-url-service/pkg/breaker"
 	"short-url-service/pkg/cache"
@@ -27,16 +28,18 @@ var ErrNotFound = errors.New("short_url not found")
 var sf singleflight.Group
 
 type ShortenerService struct {
-	idGen     *idgen.Snowflake
-	mysqlRepo *repository.MySQLRepo
-	redisCli  *cache.RedisClient
+	idGen       *idgen.Snowflake
+	mysqlRepo   *repository.MySQLRepo
+	redisCli    *cache.RedisClient
+	distributor *writer.Distributor
 }
 
-func NewShortenerService(machineID int64, mysqlRepo *repository.MySQLRepo, redisCli *cache.RedisClient) *ShortenerService {
+func NewShortenerService(machineID int64, mysqlRepo *repository.MySQLRepo, redisCli *cache.RedisClient, distributor *writer.Distributor) *ShortenerService {
 	return &ShortenerService{
-		idGen:     idgen.NewSnowflake(machineID),
-		mysqlRepo: mysqlRepo,
-		redisCli:  redisCli,
+		idGen:       idgen.NewSnowflake(machineID),
+		mysqlRepo:   mysqlRepo,
+		redisCli:    redisCli,
+		distributor: distributor,
 	}
 }
 
@@ -84,7 +87,7 @@ func (s *ShortenerService) Shorten(ctx context.Context, longURL, customKey strin
 
 	//关于写入顺序，在这里先写布隆过滤器。避免写入失败导致的数据库中存在，而布隆过滤器返回不存在的假阴性行为（导致自定义短链的假冲突，使某个短链完全不可用）。
 
-	//储存到布隆过略器
+	//布隆写入
 	if err := bloom.Add(s.redisCli.Raw(), shortCode); err != nil {
 		for retry := 0; retry < 3; retry++ {
 			if err = bloom.Add(s.redisCli.Raw(), shortCode); err == nil {
@@ -93,34 +96,9 @@ func (s *ShortenerService) Shorten(ctx context.Context, longURL, customKey strin
 			time.Sleep(50 * time.Millisecond << retry)
 		}
 		if err != nil {
-			return "", fmt.Errorf("failed to add to redis: %w", err)
+			return "", fmt.Errorf("failed to add to redis_bloom: %w", err)
 		}
 	}
-
-	// 存储到MySQL（持久化）
-	const maxRetries = 3
-	var saveErr error
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		saveErr = s.mysqlRepo.SaveIdempotent(ctx, shortCode, longURL)
-		if saveErr == nil {
-			break
-		}
-		if errors.Is(saveErr, repository.ErrDuplicateKey) {
-			// 真冲突（不同 longURL），不重试直接返回
-			return "", ErrConflict
-		}
-		// 其他错误（网络、超时等）重试
-		if attempt == maxRetries {
-			return "", fmt.Errorf("failed to save to mysql after %d attempts: %w", maxRetries, saveErr)
-		}
-		backoff := time.Duration(1<<attempt) * 50 * time.Millisecond // 指数退避: 100ms, 200ms, 400ms
-		select {
-		case <-time.After(backoff):
-		case <-ctx.Done():
-			return "", ctx.Err()
-		}
-	}
-
 	// 写入Redis缓存
 	const maxRedisRetries = 2
 	var setErr error
@@ -131,10 +109,19 @@ func (s *ShortenerService) Shorten(ctx context.Context, longURL, customKey strin
 		}
 		if attempt == maxRedisRetries {
 			slog.WarnContext(ctx, "redis cache set failed after retries", "error", setErr)
-			// 不返回错误，只记录日志（缓存不影响主流程）
-			break
+			return "", fmt.Errorf("failed to add to redis: %w", setErr)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+
+	// 存储到MySQL（持久化）
+	ok := s.distributor.Submit(shortCode, longURL)
+	if !ok {
+		// 降级：同步写入
+		slog.WarnContext(ctx, "async submit failed, fallback to sync write", "shortCode", shortCode)
+		if err := s.mysqlRepo.SaveIdempotent(ctx, shortCode, longURL); err != nil {
+			return "", err
+		}
 	}
 
 	return shortCode, nil

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"short-url-service/internal/writer"
 	"short-url-service/pkg/bloom"
 	"short-url-service/pkg/statistics"
 	"syscall"
@@ -17,6 +18,8 @@ import (
 	"short-url-service/internal/service"
 	"short-url-service/pkg/cache"
 	"short-url-service/pkg/config"
+
+	_ "net/http/pprof"
 
 	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -34,6 +37,12 @@ func init() {
 }
 
 func main() {
+	go func() {
+		slog.Info("pprof listening on :6060")
+		if err := http.ListenAndServe(":6060", nil); err != nil {
+			slog.Error("pprof error", "error", err)
+		}
+	}()
 	if err := godotenv.Load(); err != nil {
 		slog.Info("No .env file found, relying on system env")
 	}
@@ -65,8 +74,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	distributor := writer.NewDistributor(
+		4,             // 分片数
+		50000,         // 环形缓冲区大小
+		200,           // 批量大小
+		2*time.Second, // 刷新间隔
+		mysqlRepo,
+	)
+	distributor.Start()
+	defer distributor.Stop()
+
 	// 初始化业务服务
-	shortenerService := service.NewShortenerService(cfg.IDGen.MachineID, mysqlRepo, redisCli)
+	shortenerService := service.NewShortenerService(cfg.IDGen.MachineID, mysqlRepo, redisCli, distributor)
 
 	statistics.InitStatisticsWorker(10, 10000, redisCli)
 

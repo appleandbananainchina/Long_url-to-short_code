@@ -25,8 +25,8 @@ func NewMySQLRepo(dsn string) (*MySQLRepo, error) {
 		return nil, err
 	}
 	// 连接池配置
-	db.SetMaxOpenConns(100)
-	db.SetMaxIdleConns(10)
+	db.SetMaxOpenConns(150)
+	db.SetMaxIdleConns(50)
 	db.SetConnMaxLifetime(5 * time.Minute)
 	db.SetConnMaxIdleTime(2 * time.Minute)
 	go func() {
@@ -145,4 +145,49 @@ func (r *MySQLRepo) GetWithBreaker(ctx context.Context, shortCode string) (strin
 	return breaker.MySQLBreaker.Do(ctx, func() (string, error) {
 		return r.Get(ctx, shortCode)
 	})
+}
+
+// MySQLTx
+type MySQLTx struct {
+	tx *sql.Tx
+}
+
+func (r *MySQLRepo) BeginTx(ctx context.Context) (*MySQLTx, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &MySQLTx{tx: tx}, nil
+}
+
+func (tx *MySQLTx) SaveIdempotent(ctx context.Context, shortCode, longURL string) error {
+	_, err := tx.tx.ExecContext(ctx,
+		"INSERT INTO short_url.url_mapping (short_code, long_url) VALUES (?, ?)",
+		shortCode, longURL)
+	if err != nil {
+		if isDuplicateKeyError(err) {
+			// 冲突：检查是否内容相同
+			var existing string
+			checkErr := tx.tx.QueryRowContext(ctx,
+				"SELECT long_url FROM short_url.url_mapping WHERE short_code = ? FOR UPDATE",
+				shortCode).Scan(&existing)
+			if checkErr != nil {
+				return ErrDuplicateKey
+			}
+			if existing == longURL {
+				return nil // 幂等
+			}
+			return ErrDuplicateKey
+		}
+		return err
+	}
+	return nil
+}
+
+func (tx *MySQLTx) Commit() error {
+	return tx.tx.Commit()
+}
+
+func (tx *MySQLTx) Rollback() error {
+	return tx.tx.Rollback()
 }
